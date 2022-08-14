@@ -1,9 +1,12 @@
 ﻿using BaseX;
 using CloudX.Shared;
 using FrooxEngine;
+using FrooxEngine.UIX;
 using HarmonyLib;
 using NeosModLoader;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace FlexibleContactsSort
 {
@@ -24,11 +27,13 @@ namespace FlexibleContactsSort
         private static ModConfigurationKey<int> ContactRequestPriority = new ModConfigurationKey<int>("ContactRequestPriority", "Priority of the contact being a new request. Set 0 to ignore; negative to invert.", () => 1000);
 
         [AutoRegisterConfigKey]
-        private static ModConfigurationKey<int> UnreadMsgPriority = new ModConfigurationKey<int>("UnreadMsgPriority", "Priority of the contact having an unread message. Set 0 to ignore; negative to invert.", () => 10000);
+        private static ModConfigurationKey<string[]> PinnedContactsKey = new ModConfigurationKey<string[]>("PinnedContacts", "List of Contacts to always keep at the top.", () => new string[0], internalAccessOnly: true);
+
+        private static HashSet<string> PinnedContacts = new HashSet<string>();
 
         public override string Name => "FlexibleContactsSort";
         public override string Author => "Banane9";
-        public override string Version => "2.0.0";
+        public override string Version => "2.1.0";
         public override string Link => "https://github.com/Banane9/NeosFlexibleContactsSort";
 
         public override void OnEngineInit()
@@ -37,22 +42,56 @@ namespace FlexibleContactsSort
             Warn($"Extremely verbose debug logging is enabled in this build. This probably means Banane9 messed up and gave you a debug build.");
 #endif
             Harmony harmony = new Harmony($"{Author}.{Name}");
-            Config = GetConfiguration();
+            Config = GetConfiguration()!;
             Config.Save(true);
+
+            foreach (var contact in Config.GetValue(PinnedContactsKey)!)
+                PinnedContacts.Add(contact);
+
             harmony.PatchAll();
         }
 
-        [HarmonyPatch(typeof(FriendsDialog), "OnCommonUpdate")]
+        [HarmonyPatch(typeof(FriendsDialog))]
         private static class FriendsDialogPatch
         {
-            public static void Prefix(ref bool ___sortList, out bool __state)
+            [HarmonyPostfix]
+            [HarmonyPatch("UpdateSelectedFriend")]
+            private static void UpdateSelectedFriendPostfix(FriendsDialog __instance, UIBuilder ___actionsUi)
+            {
+                if (__instance.SelectedFriend == null || __instance.SelectedFriend.FriendUserId == "U-Neos")
+                    return;
+
+                var pinButton = ___actionsUi.Button(PinnedContacts.Contains(__instance.SelectedFriendId) ? "Unpin Contact" : "Pin Contact");
+                pinButton.LocalPressed += (button, data) =>
+                {
+                    if (PinnedContacts.Contains(__instance.SelectedFriendId))
+                    {
+                        PinnedContacts.Remove(__instance.SelectedFriendId);
+                        pinButton.LabelText = "Pin Contact";
+                    }
+                    else
+                    {
+                        PinnedContacts.Add(__instance.SelectedFriendId);
+                        pinButton.LabelText = "Unpin Contact";
+                    }
+
+                    Config.Set(PinnedContactsKey, PinnedContacts.ToArray());
+                    Config.Save(true);
+                };
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch("OnCommonUpdate")]
+            private static void Prefix(ref bool ___sortList, out bool __state)
             {
                 // steal the sortList bool's value, and force it to false from Neos's perspective
                 __state = ___sortList;
                 ___sortList = false;
             }
 
-            public static void Postfix(bool __state, SyncRef<Slot> ____listRoot)
+            [HarmonyPostfix]
+            [HarmonyPatch("OnCommonUpdate")]
+            private static void Postfix(bool __state, SyncRef<Slot> ____listRoot)
             {
                 // if Neos would have sorted (but we prevented it)
                 if (__state)
@@ -100,14 +139,16 @@ namespace FlexibleContactsSort
         private static int CalculateFriendOrderScore(FriendItem friendItem)
         {
             var friend = friendItem.Friend;
+            var pinned = PinnedContacts.Contains(friend.FriendUserId);
 
-            var score = friend.FriendUserId == "U-Neos" ? -100_000_000 : 0;
+            var score = friend.FriendUserId == "U-Neos" ? -101_000_000 : 0;
+            score = HasUnreadMessages(friendItem) || pinned ? -100_000_000 : score;
+
             score += friend.FriendStatus == FriendStatus.SearchResult ? 100_000_000 : 0; // non-contact search results always at the end
             score += IsOfflineContact(friend) ? 10_000_000 : 0; // offline friends before results
             score += IsOutgoingRequest(friend) ? 9_000_000 : 0; // outgoing requests before offline
 
             score += (IsIncomingRequest(friend) ? 0 : 1) * Config.GetValue(ContactRequestPriority);
-            score += (HasUnreadMessages(friendItem) ? 0 : 1) * Config.GetValue(UnreadMsgPriority);
             score += (IsInJoinableSession(friend) ? 0 : 1) * Config.GetValue(JoinablePriority);
             score += GetOnlineStatusOrderNumber(friend) * Config.GetValue(OnlineStatusPriority);
 
