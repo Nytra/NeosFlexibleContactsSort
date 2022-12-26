@@ -141,11 +141,17 @@ namespace FlexibleContactsSort
             var friend = friendItem.Friend;
             var pinned = PinnedContacts.Contains(friend.FriendUserId);
 
-            var score = friend.FriendUserId == "U-Neos" ? -101_000_000 : 0;
-            score = HasUnreadMessages(friendItem) || pinned ? -100_000_000 : score;
+            var score = 0;
+            var unreadOrPinned = HasUnreadMessages(friendItem) || pinned;
+            
+            score += friend.FriendUserId == "U-Neos" ? -101_000_000 : 0;
+            score += unreadOrPinned ? -100_000_000 : 0;
 
             score += friend.FriendStatus == FriendStatus.SearchResult ? 100_000_000 : 0; // non-contact search results always at the end
-            score += IsOfflineContact(friend) ? 10_000_000 : 0; // offline friends before results
+
+            // Ignore offline status if this contact has unread messages or is pinned
+            score += (IsOfflineContact(friend) && !unreadOrPinned) ? 10_000_000 : 0; // offline friends before results
+
             score += IsOutgoingRequest(friend) ? 9_000_000 : 0; // outgoing requests before offline
 
             score += (IsIncomingRequest(friend) ? 0 : 1) * Config.GetValue(ContactRequestPriority);
